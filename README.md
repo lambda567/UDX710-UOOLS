@@ -225,6 +225,19 @@ This project is licensed under **GPLv3** (strong Copyleft):
 
 See [LICENSE](LICENSE)
 
+## 🙏 Acknowledgments
+
+Special thanks to the following contributors:
+
+| Contributor | Contribution | Contact |
+|:---:|:---|:---:|
+| **等不住** | AT Commands | QQ: 3066618313 |
+| **黑衣剑士** | USB Mode Switch | QQ: 2079853997 |
+| **Voodoo** | Glib Build Environment | QQ: 2079853997 |
+| **LeoChen** | Project Author | QQ: 1708636545 |
+
+Thanks to all community members for your support and feedback!
+
 ## ☕ Support the Project
 
 This project is completely open source and free. If you like this project, you can buy me a coffee~
