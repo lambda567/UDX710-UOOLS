@@ -357,19 +357,134 @@ int ofono_network_get_signal_strength(const char* modem_path, int* strength, int
 #define DEFAULT_CONTEXT_PATH      "/ril_0/context2"
 #define DEFAULT_MODEM_PATH        "/ril_0"
 
+/**
+ * 动态查找第一个有效的 internet 类型 context 路径
+ * 遍历所有 context，优先返回配置了 APN 的 internet 类型 context
+ * 
+ * @param path_buf 输出缓冲区，存储找到的 context 路径
+ * @param buf_size 缓冲区大小
+ * @return 0 成功，-1 失败
+ */
+static int find_internet_context_path(char *path_buf, size_t buf_size) {
+    GError *error = NULL;
+    GVariant *result = NULL;
+    GDBusProxy *proxy = NULL;
+    int found = 0;
+    char first_internet_path[256] = {0};
+
+    if (!path_buf || buf_size == 0 || !ensure_connection()) {
+        return -1;
+    }
+
+    /* 创建 ConnectionManager 代理 */
+    proxy = g_dbus_proxy_new_sync(
+        g_dbus_conn, G_DBUS_PROXY_FLAGS_NONE, NULL,
+        OFONO_SERVICE, DEFAULT_MODEM_PATH, OFONO_CONNECTION_MANAGER,
+        NULL, &error
+    );
+
+    if (!proxy) {
+        if (error) g_error_free(error);
+        /* 回退到默认路径 */
+        strncpy(path_buf, DEFAULT_CONTEXT_PATH, buf_size - 1);
+        return 0;
+    }
+
+    /* 调用 GetContexts 获取所有 context */
+    result = g_dbus_proxy_call_sync(
+        proxy, "GetContexts", NULL,
+        G_DBUS_CALL_FLAGS_NONE, OFONO_TIMEOUT_MS, NULL, &error
+    );
+
+    if (!result) {
+        if (error) g_error_free(error);
+        g_object_unref(proxy);
+        strncpy(path_buf, DEFAULT_CONTEXT_PATH, buf_size - 1);
+        return 0;
+    }
+
+    /* 解析返回的 a(oa{sv}) 数组 */
+    GVariant *array = g_variant_get_child_value(result, 0);
+    GVariantIter iter;
+    GVariant *child;
+
+    g_variant_iter_init(&iter, array);
+    while ((child = g_variant_iter_next_value(&iter)) != NULL) {
+        const gchar *path = NULL;
+        GVariant *props = NULL;
+
+        g_variant_get(child, "(&o@a{sv})", &path, &props);
+
+        if (props && path) {
+            /* 获取 Type 属性 */
+            GVariant *type_var = g_variant_lookup_value(props, "Type", G_VARIANT_TYPE_STRING);
+            const gchar *context_type = type_var ? g_variant_get_string(type_var, NULL) : "";
+
+            if (g_strcmp0(context_type, "internet") == 0) {
+                /* 获取 AccessPointName 属性 */
+                GVariant *apn_var = g_variant_lookup_value(props, "AccessPointName", G_VARIANT_TYPE_STRING);
+                const gchar *apn = apn_var ? g_variant_get_string(apn_var, NULL) : "";
+
+                /* 记录第一个 internet context */
+                if (first_internet_path[0] == '\0') {
+                    strncpy(first_internet_path, path, sizeof(first_internet_path) - 1);
+                }
+
+                /* 优先返回配置了 APN 的 context */
+                if (apn && apn[0] != '\0') {
+                    strncpy(path_buf, path, buf_size - 1);
+                    found = 1;
+                    if (apn_var) g_variant_unref(apn_var);
+                    if (type_var) g_variant_unref(type_var);
+                    g_variant_unref(props);
+                    g_variant_unref(child);
+                    break;
+                }
+
+                if (apn_var) g_variant_unref(apn_var);
+            }
+
+            if (type_var) g_variant_unref(type_var);
+            g_variant_unref(props);
+        }
+        g_variant_unref(child);
+    }
+
+    g_variant_unref(array);
+    g_variant_unref(result);
+    g_object_unref(proxy);
+
+    /* 如果没找到配置了 APN 的，使用第一个 internet context */
+    if (!found) {
+        if (first_internet_path[0] != '\0') {
+            strncpy(path_buf, first_internet_path, buf_size - 1);
+        } else {
+            strncpy(path_buf, DEFAULT_CONTEXT_PATH, buf_size - 1);
+        }
+    }
+
+    return 0;
+}
+
 int ofono_get_data_status(int *active) {
     GError *error = NULL;
     GVariant *result = NULL;
     GDBusProxy *proxy = NULL;
     int ret = -1;
+    char context_path[256] = {0};
 
     if (!active || !ensure_connection()) {
         return -1;
     }
 
+    /* 动态获取 internet context 路径 */
+    if (find_internet_context_path(context_path, sizeof(context_path)) != 0) {
+        return -1;
+    }
+
     proxy = g_dbus_proxy_new_sync(
         g_dbus_conn, G_DBUS_PROXY_FLAGS_NONE, NULL,
-        OFONO_SERVICE, DEFAULT_CONTEXT_PATH, OFONO_CONNECTION_CONTEXT,
+        OFONO_SERVICE, context_path, OFONO_CONNECTION_CONTEXT,
         NULL, &error
     );
 
@@ -415,14 +530,20 @@ int ofono_set_data_status(int active) {
     GError *error = NULL;
     GVariant *result = NULL;
     GDBusProxy *proxy = NULL;
+    char context_path[256] = {0};
 
     if (!ensure_connection()) {
         return -1;
     }
 
+    /* 动态获取 internet context 路径 */
+    if (find_internet_context_path(context_path, sizeof(context_path)) != 0) {
+        return -1;
+    }
+
     proxy = g_dbus_proxy_new_sync(
         g_dbus_conn, G_DBUS_PROXY_FLAGS_NONE, NULL,
-        OFONO_SERVICE, DEFAULT_CONTEXT_PATH, OFONO_CONNECTION_CONTEXT,
+        OFONO_SERVICE, context_path, OFONO_CONNECTION_CONTEXT,
         NULL, &error
     );
 
