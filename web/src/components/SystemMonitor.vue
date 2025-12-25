@@ -59,13 +59,22 @@ onUnmounted(() => {
   if (bandTimer) clearInterval(bandTimer)
 })
 
-// 信号强度颜色和等级
-function getSignalInfo(rsrp) {
-  if (!rsrp || rsrp === 0) return { color: 'text-white/40', bg: 'from-gray-500 to-gray-400', level: 0 }
-  if (rsrp >= -80) return { color: 'text-green-400', bg: 'from-green-500 to-emerald-400', level: 4 }
-  if (rsrp >= -90) return { color: 'text-yellow-400', bg: 'from-yellow-500 to-amber-400', level: 3 }
-  if (rsrp >= -100) return { color: 'text-orange-400', bg: 'from-orange-500 to-red-400', level: 2 }
-  return { color: 'text-red-400', bg: 'from-red-500 to-rose-400', level: 1 }
+// 信号强度等级计算（返回1-4）
+function getSignalLevel(rsrp) {
+  if (!rsrp || rsrp === 0) return 0
+  if (rsrp >= -80) return 4   // 优秀
+  if (rsrp >= -90) return 3   // 良好  
+  if (rsrp >= -100) return 2  // 一般
+  return 1                     // 差
+}
+
+// 信号强度颜色
+function getSignalColor(rsrp) {
+  if (!rsrp || rsrp === 0) return { text: 'text-gray-400', bg: 'bg-gray-400' }
+  if (rsrp >= -80) return { text: 'text-green-400', bg: 'bg-green-400' }
+  if (rsrp >= -90) return { text: 'text-yellow-400', bg: 'bg-yellow-400' }
+  if (rsrp >= -100) return { text: 'text-orange-400', bg: 'bg-orange-400' }
+  return { text: 'text-red-400', bg: 'bg-red-400' }
 }
 
 // 判断是否有网络连接（通过RSRP是否有有效值来判断）
@@ -165,11 +174,13 @@ async function handleClearCache() {
             <!-- RSRP信号强度指示 -->
             <div v-if="currentBand" class="flex items-center space-x-2 px-3 py-2 bg-white/80 dark:bg-white/5 rounded-xl border border-slate-200 dark:border-white/10">
               <div class="flex items-end space-x-0.5 h-5">
-                <div v-for="i in 4" :key="i" class="w-1.5 rounded-full transition-all" 
-                  :class="[i <= getSignalInfo(currentBand.rsrp).level ? getSignalInfo(currentBand.rsrp).color.replace('text-', 'bg-') : 'bg-slate-300 dark:bg-white/20']"
-                  :style="{ height: (i * 3 + 5) + 'px' }"></div>
+                <!-- 4格信号：根据level决定高亮数量 -->
+                <div class="w-1.5 h-2 rounded-full" :class="getSignalLevel(currentBand.rsrp) >= 1 ? getSignalColor(currentBand.rsrp).bg : 'bg-gray-300 dark:bg-gray-600'"></div>
+                <div class="w-1.5 h-3 rounded-full" :class="getSignalLevel(currentBand.rsrp) >= 2 ? getSignalColor(currentBand.rsrp).bg : 'bg-gray-300 dark:bg-gray-600'"></div>
+                <div class="w-1.5 h-4 rounded-full" :class="getSignalLevel(currentBand.rsrp) >= 3 ? getSignalColor(currentBand.rsrp).bg : 'bg-gray-300 dark:bg-gray-600'"></div>
+                <div class="w-1.5 h-5 rounded-full" :class="getSignalLevel(currentBand.rsrp) >= 4 ? getSignalColor(currentBand.rsrp).bg : 'bg-gray-300 dark:bg-gray-600'"></div>
               </div>
-              <span class="text-sm font-medium" :class="getSignalInfo(currentBand.rsrp).color">
+              <span class="text-sm font-medium" :class="getSignalColor(currentBand.rsrp).text">
                 {{ currentBand.rsrp ? currentBand.rsrp.toFixed(0) + ' dBm' : 'N/A' }}
               </span>
             </div>

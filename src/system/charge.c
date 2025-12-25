@@ -17,7 +17,7 @@
 #include <glib.h>
 #include "mongoose.h"
 #include "charge.h"
-#include "sms.h"  /* 使用通用配置函数 */
+#include "database.h"  /* 使用数据库配置函数 */
 #include "http_utils.h"
 
 #define BATTERY_UEVENT "/sys/class/power_supply/battery/uevent"

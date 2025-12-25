@@ -174,55 +174,6 @@ int sms_get_fix_enabled(void);
  */
 int sms_set_fix_enabled(int enabled);
 
-/**
- * 获取通用配置值
- * @param key 配置键名
- * @param value 输出值缓冲区
- * @param value_size 缓冲区大小
- * @return 0成功, -1失败
- */
-int config_get(const char *key, char *value, size_t value_size);
-
-/**
- * 设置通用配置值
- * @param key 配置键名
- * @param value 配置值
- * @return 0成功, -1失败
- */
-int config_set(const char *key, const char *value);
-
-/**
- * 获取通用配置整数值
- * @param key 配置键名
- * @param default_val 默认值
- * @return 配置值或默认值
- */
-int config_get_int(const char *key, int default_val);
-
-/**
- * 设置通用配置整数值
- * @param key 配置键名
- * @param value 配置值
- * @return 0成功, -1失败
- */
-int config_set_int(const char *key, int value);
-
-/**
- * 获取通用配置长整数值
- * @param key 配置键名
- * @param default_val 默认值
- * @return 配置值或默认值
- */
-long long config_get_ll(const char *key, long long default_val);
-
-/**
- * 设置通用配置长整数值
- * @param key 配置键名
- * @param value 配置值
- * @return 0成功, -1失败
- */
-int config_set_ll(const char *key, long long value);
-
 #ifdef __cplusplus
 }
 #endif

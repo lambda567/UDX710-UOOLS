@@ -13,7 +13,7 @@
 #include "mongoose.h"
 #include "traffic.h"
 #include "exec_utils.h"
-#include "sms.h"  /* 使用通用配置函数 */
+#include "database.h"  /* 使用数据库配置函数 */
 #include "airplane.h"  /* 飞行模式控制 */
 #include "http_utils.h"
 

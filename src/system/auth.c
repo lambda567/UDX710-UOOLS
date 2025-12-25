@@ -11,50 +11,13 @@
 #include <unistd.h>
 #include "auth.h"
 #include "sha256.h"
-
-/* 外部函数声明 - 来自sms.c */
-extern int config_get(const char *key, char *value, size_t value_size);
-extern int config_set(const char *key, const char *value);
-extern const char *get_db_path(void);
+#include "database.h"
 
 /* 外部函数 - 执行命令 */
 extern int run_command(char *output, size_t output_size, const char *cmd, ...);
 
 /* 配置键名 */
 #define KEY_PASSWORD_HASH   "auth_password_hash"
-
-/**
- * 执行Token相关的SQL（内部使用）
- */
-static int token_db_execute(const char *sql)
-{
-    char cmd[1024];
-    char output[256];
-    
-    snprintf(cmd, sizeof(cmd), "sqlite3 '%s' \"%s\"", get_db_path(), sql);
-    return run_command(output, sizeof(output), "sh", "-c", cmd, NULL);
-}
-
-/**
- * 查询Token数量
- */
-static int token_db_query_int(const char *sql)
-{
-    char cmd[1024];
-    char output[256] = {0};
-    
-    snprintf(cmd, sizeof(cmd), "sqlite3 '%s' \"%s\"", get_db_path(), sql);
-    if (run_command(output, sizeof(output), "sh", "-c", cmd, NULL) != 0) {
-        return -1;
-    }
-    
-    /* 去除换行符 */
-    size_t len = strlen(output);
-    if (len > 0 && output[len-1] == '\n') output[len-1] = '\0';
-    
-    return atoi(output);
-}
-
 
 /**
  * 生成随机Token
@@ -119,7 +82,7 @@ static int cleanup_expired_tokens(void)
     snprintf(sql, sizeof(sql),
         "DELETE FROM auth_tokens WHERE expire_time <= %lld;", now);
     
-    return token_db_execute(sql);
+    return db_execute_safe(sql);
 }
 
 /**
@@ -127,7 +90,7 @@ static int cleanup_expired_tokens(void)
  */
 static int get_token_count(void)
 {
-    return token_db_query_int("SELECT COUNT(*) FROM auth_tokens;");
+    return db_query_int("SELECT COUNT(*) FROM auth_tokens;", 0);
 }
 
 /**
@@ -135,7 +98,7 @@ static int get_token_count(void)
  */
 static int delete_oldest_token(void)
 {
-    return token_db_execute(
+    return db_execute_safe(
         "DELETE FROM auth_tokens WHERE id = "
         "(SELECT id FROM auth_tokens ORDER BY created_at ASC LIMIT 1);");
 }
@@ -209,7 +172,7 @@ int auth_login(const char *password, char *token, size_t token_size)
         "INSERT INTO auth_tokens (token, expire_time, created_at) VALUES ('%s', %lld, %lld);",
         token, expire_time, now);
     
-    if (token_db_execute(sql) != 0) {
+    if (db_execute_safe(sql) != 0) {
         printf("[AUTH] 保存Token失败\n");
         return -2;
     }
@@ -222,9 +185,9 @@ int auth_login(const char *password, char *token, size_t token_size)
 
 int auth_verify_token(const char *token)
 {
-    char cmd[1024];
-    char output[256] = {0};
+    char sql[512];
     long long now;
+    int count;
     
     if (!token || strlen(token) == 0) {
         return -1;
@@ -233,19 +196,13 @@ int auth_verify_token(const char *token)
     now = (long long)time(NULL);
     
     /* 查询Token是否存在且未过期 */
-    snprintf(cmd, sizeof(cmd),
-        "sqlite3 '%s' \"SELECT COUNT(*) FROM auth_tokens WHERE token='%s' AND expire_time > %lld;\"",
-        get_db_path(), token, now);
+    snprintf(sql, sizeof(sql),
+        "SELECT COUNT(*) FROM auth_tokens WHERE token='%s' AND expire_time > %lld;",
+        token, now);
     
-    if (run_command(output, sizeof(output), "sh", "-c", cmd, NULL) != 0) {
-        return -1;
-    }
+    count = db_query_int(sql, 0);
     
-    /* 去除换行符 */
-    size_t len = strlen(output);
-    if (len > 0 && output[len-1] == '\n') output[len-1] = '\0';
-    
-    if (atoi(output) > 0) {
+    if (count > 0) {
         return 0;  /* Token有效 */
     }
     
@@ -285,7 +242,7 @@ int auth_change_password(const char *old_password, const char *new_password)
     }
     
     /* 清除所有Token，强制所有设备重新登录 */
-    token_db_execute("DELETE FROM auth_tokens;");
+    db_execute_safe("DELETE FROM auth_tokens;");
     
     printf("[AUTH] 密码修改成功，所有设备需重新登录\n");
     return 0;
@@ -303,7 +260,7 @@ int auth_logout(const char *token)
     snprintf(sql, sizeof(sql),
         "DELETE FROM auth_tokens WHERE token='%s';", token);
     
-    if (token_db_execute(sql) != 0) {
+    if (db_execute_safe(sql) != 0) {
         return -1;
     }
     

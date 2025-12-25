@@ -13,6 +13,7 @@
 #include "dbus_core.h"
 #include "exec_utils.h"
 #include "http_utils.h"
+#include "ofono.h"
 
 /* 频段映射结构 */
 typedef struct {
@@ -315,22 +316,59 @@ void handle_unlock_bands(struct mg_connection *c, struct mg_http_message *hm) {
 extern int parse_cell_to_vec(const char *input, char data[64][16][32]);
 
 /**
+ * 根据 NR ARFCN 推算 5G 频段
+ * 参考 3GPP TS 38.104
+ * @param arfcn NR 绝对频点号
+ * @return 频段号字符串（不含N前缀），如 "41", "78"，未知返回空字符串
+ */
+static const char* arfcn_to_nr_band(int arfcn) {
+    if (arfcn >= 422000 && arfcn <= 434000) return "1";   /* N1 (2100 MHz FDD) */
+    if (arfcn >= 361000 && arfcn <= 376000) return "3";   /* N3 (1800 MHz FDD) */
+    if (arfcn >= 185000 && arfcn <= 192000) return "8";   /* N8 (900 MHz FDD) */
+    if (arfcn >= 151600 && arfcn <= 160600) return "28";  /* N28 (700 MHz FDD) */
+    if (arfcn >= 499200 && arfcn <= 537999) return "41";  /* N41 (2600 MHz TDD) */
+    if (arfcn >= 620000 && arfcn <= 680000) return "78";  /* N77/N78 (3700 MHz TDD) */
+    if (arfcn >= 693334 && arfcn <= 733333) return "79";  /* N79 (4700 MHz TDD) */
+    return "";
+}
+
+/**
+ * 根据 LTE EARFCN 推算 4G 频段
+ * 参考 3GPP TS 36.101
+ * @param earfcn LTE 绝对频点号
+ * @return 频段号字符串（不含B前缀），如 "3", "41"，未知返回空字符串
+ */
+static const char* earfcn_to_lte_band(int earfcn) {
+    if (earfcn >= 0 && earfcn <= 599) return "1";         /* B1 (2100 MHz FDD) */
+    if (earfcn >= 1200 && earfcn <= 1949) return "3";     /* B3 (1800 MHz FDD) */
+    if (earfcn >= 2400 && earfcn <= 2649) return "5";     /* B5 (850 MHz FDD) */
+    if (earfcn >= 2750 && earfcn <= 3449) return "7";     /* B7 (2600 MHz FDD) */
+    if (earfcn >= 3450 && earfcn <= 3799) return "8";     /* B8 (900 MHz FDD) */
+    if (earfcn >= 6150 && earfcn <= 6449) return "20";    /* B20 (800 MHz FDD) */
+    if (earfcn >= 9210 && earfcn <= 9659) return "28";    /* B28 (700 MHz FDD) */
+    if (earfcn >= 37750 && earfcn <= 38249) return "38";  /* B38 (2600 MHz TDD) */
+    if (earfcn >= 38250 && earfcn <= 38649) return "39";  /* B39 (1900 MHz TDD) */
+    if (earfcn >= 38650 && earfcn <= 39649) return "40";  /* B40 (2300 MHz TDD) */
+    if (earfcn >= 39650 && earfcn <= 41589) return "41";  /* B41 (2500 MHz TDD) */
+    return "";
+}
+
+/**
  * 判断当前网络是否为 5G
  * 通过 D-Bus 查询 oFono NetworkMonitor 获取网络类型
  * @return 1=5G, 0=4G/其他
  */
 static int is_5g_network(void) {
-    char output[2048];
+    char tech[32] = {0};
     
-    /* 使用 dbus-send 获取网络信息 (与 Go 版本一致) */
-    if (run_command(output, sizeof(output), "dbus-send", "--system", "--dest=org.ofono", 
-                    "--print-reply", "/ril_0", "org.ofono.NetworkMonitor.GetServingCellInformation", NULL) != 0) {
+    /* 使用 C 原生 D-Bus 调用获取网络类型 */
+    if (ofono_get_serving_cell_tech(tech, sizeof(tech)) != 0) {
         printf("D-Bus 查询网络类型失败，默认使用 4G\n");
         return 0;
     }
 
-    /* 判断网络类型 - 检查是否包含 "nr" */
-    if (strstr(output, "\"nr\"")) {
+    /* 判断网络类型 - 检查是否为 "nr" */
+    if (strcmp(tech, "nr") == 0) {
         return 1; /* 5G */
     }
     
@@ -383,12 +421,19 @@ void handle_get_cells(struct mg_connection *c, struct mg_http_message *hm) {
                     int arfcn = atoi(data[1][i]);
                     int pci = atoi(data[2][i]);
                     if (arfcn == 0 || pci == 0) continue;
+                    
+                    /* 频段处理：如果为空或"0"，通过 ARFCN 推算 */
+                    const char *band_str = data[0][i];
+                    if (strlen(band_str) == 0 || strcmp(band_str, "0") == 0) {
+                        band_str = arfcn_to_nr_band(arfcn);
+                    }
+                    
                     char cell_json[512];
                     snprintf(cell_json, sizeof(cell_json),
                         "%s{\"rat\":\"5G\",\"band\":\"N%s\",\"arfcn\":%d,\"pci\":%d,"
                         "\"rsrp\":%.2f,\"rsrq\":%.2f,\"sinr\":%.2f,\"isServing\":false}",
                         cell_count > 0 ? "," : "",
-                        data[0][i], arfcn, pci,
+                        band_str, arfcn, pci,
                         atof(data[3][i]) / 100.0, atof(data[4][i]) / 100.0,
                         atof(data[5][i]) / 100.0);
                     json_len += snprintf(json + json_len, sizeof(json) - json_len, "%s", cell_json);
@@ -425,8 +470,15 @@ void handle_get_cells(struct mg_connection *c, struct mg_http_message *hm) {
                 int arfcn = atoi(data[i][0]);
                 int pci = atoi(data[i][1]);
                 if (arfcn == 0 || pci == 0) continue;
+                
+                /* 频段处理：如果为空或"0"，通过 EARFCN 推算 */
+                const char *band = data[i][12];
+                if (strlen(band) == 0 || strcmp(band, "0") == 0) {
+                    band = earfcn_to_lte_band(arfcn);
+                    if (strlen(band) == 0) band = "0";  /* 未知频段默认显示0 */
+                }
+                
                 char cell_json[512];
-                const char *band = (strlen(data[i][12]) > 0) ? data[i][12] : "0";
                 snprintf(cell_json, sizeof(cell_json),
                     "%s{\"rat\":\"4G\",\"band\":\"B%s\",\"arfcn\":%d,\"pci\":%d,"
                     "\"rsrp\":%.2f,\"rsrq\":%.2f,\"sinr\":%.2f,\"isServing\":false}",

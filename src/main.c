@@ -6,8 +6,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "handlers/http_server.h"
-#include "system/ofono.h"
+#include "http_server.h"
+#include "ofono.h"
 
 int main(int argc, char *argv[]) {
     const char *port = "6677";

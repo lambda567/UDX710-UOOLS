@@ -180,6 +180,15 @@ int ofono_set_apn_properties(const char *context_path,
                              const char *password,
                              const char *auth_method);
 
+/**
+ * 获取当前服务小区的网络技术类型
+ * 通过 NetworkMonitor.GetServingCellInformation 获取
+ * @param tech 输出技术类型字符串 (如 "nr", "lte", "umts", "gsm")
+ * @param size 缓冲区大小
+ * @return 成功返回0，失败返回错误码
+ */
+int ofono_get_serving_cell_tech(char *tech, int size);
+
 #ifdef __cplusplus
 }
 #endif

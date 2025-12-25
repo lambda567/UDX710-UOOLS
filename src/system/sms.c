@@ -1,6 +1,6 @@
 /**
  * @file sms.c
- * @brief 短信管理模块实现 - D-Bus监控、发送、SQLite存储、Webhook转发
+ * @brief 短信管理模块实现 - D-Bus监控、发送、Webhook转发
  */
 
 #include <stdio.h>
@@ -9,10 +9,10 @@
 #include <pthread.h>
 #include <gio/gio.h>
 #include "sms.h"
+#include "database.h"
 #include "exec_utils.h"
 
-/* SQLite3 简易接口 - 使用命令行工具 */
-static char g_db_path[256] = "6677.db";
+/* 短信模块专用互斥锁 */
 static pthread_mutex_t g_sms_mutex = PTHREAD_MUTEX_INITIALIZER;
 static GDBusConnection *g_sms_dbus_conn = NULL;
 static guint g_signal_subscription_id = 0;
@@ -33,8 +33,6 @@ static int g_max_sent_count = DEFAULT_MAX_SENT_COUNT;
 static void on_incoming_message(GDBusConnection *conn, const gchar *sender_name,
     const gchar *object_path, const gchar *interface_name, const gchar *signal_name,
     GVariant *parameters, gpointer user_data);
-static int db_execute(const char *sql);
-static int db_init(void);
 static int save_sms_to_db(const char *sender, const char *content, time_t timestamp);
 static int save_sent_sms_to_db(const char *recipient, const char *content, time_t timestamp, const char *status);
 static void send_webhook_notification(const SmsMessage *msg);
@@ -120,90 +118,6 @@ static void hex_decode(const char *hex, char *out, size_t out_size) {
         }
     }
     out[j] = '\0';
-}
-
-/* 初始化数据库 */
-static int db_init(void) {
-    char sql[1024];
-    snprintf(sql, sizeof(sql),
-        "CREATE TABLE IF NOT EXISTS sms ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        "sender TEXT NOT NULL,"
-        "content TEXT NOT NULL,"
-        "timestamp INTEGER NOT NULL,"
-        "is_read INTEGER DEFAULT 0"
-        ");"
-        "CREATE TABLE IF NOT EXISTS sent_sms ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        "recipient TEXT NOT NULL,"
-        "content TEXT NOT NULL,"
-        "timestamp INTEGER NOT NULL,"
-        "status TEXT DEFAULT 'sent'"
-        ");"
-        "CREATE TABLE IF NOT EXISTS webhook_config ("
-        "id INTEGER PRIMARY KEY,"
-        "enabled INTEGER DEFAULT 0,"
-        "platform TEXT,"
-        "url TEXT,"
-        "body TEXT,"
-        "headers TEXT"
-        ");"
-        "CREATE TABLE IF NOT EXISTS sms_config ("
-        "id INTEGER PRIMARY KEY,"
-        "max_count INTEGER DEFAULT 50,"
-        "max_sent_count INTEGER DEFAULT 10,"
-        "sms_fix_enabled INTEGER DEFAULT 0"
-        ");"
-        "CREATE TABLE IF NOT EXISTS config ("
-        "key TEXT PRIMARY KEY,"
-        "value TEXT"
-        ");"
-        "CREATE TABLE IF NOT EXISTS auth_tokens ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        "token TEXT UNIQUE NOT NULL,"
-        "expire_time INTEGER NOT NULL,"
-        "created_at INTEGER NOT NULL"
-        ");");
-    
-    /* 为旧数据库添加新字段（忽略错误，字段可能已存在） */
-    db_execute("ALTER TABLE sms_config ADD COLUMN sms_fix_enabled INTEGER DEFAULT 0;");
-    return db_execute(sql);
-}
-
-/* 执行SQL命令 - 使用临时文件避免shell转义问题 */
-static int db_execute(const char *sql) {
-    char output[1024];
-    int ret = -1;
-    
-    /* 对于长SQL或包含特殊字符的SQL，使用临时文件 */ 
-    size_t sql_len = strlen(sql);
-    if (sql_len > 1000 || strchr(sql, '"') || strchr(sql, '\n')) {
-        const char *tmp_sql = "/tmp/sms_sql.tmp";
-        FILE *fp = fopen(tmp_sql, "w");
-        if (!fp) {
-            printf("SQL执行失败: 无法创建临时文件\n");
-            return -1;
-        }
-        fputs(sql, fp);
-        fclose(fp);
-        
-        char cmd[512];
-        snprintf(cmd, sizeof(cmd), "sqlite3 '%s' < %s", g_db_path, tmp_sql);
-        ret = run_command(output, sizeof(output), "sh", "-c", cmd, NULL);
-        
-        /* 删除临时文件 */
-        unlink(tmp_sql);
-    } else {
-        char cmd[4096];
-        snprintf(cmd, sizeof(cmd), "sqlite3 '%s' \"%s\"", g_db_path, sql);
-        ret = run_command(output, sizeof(output), "sh", "-c", cmd, NULL);
-    }
-    
-    if (ret != 0) {
-        printf("SQL执行失败: %.200s...\n", sql);
-        return -1;
-    }
-    return 0;
 }
 
 /* 保存短信到数据库 */
@@ -497,17 +411,15 @@ int sms_init(const char *db_path) {
         return 0;
     }
     
-    if (db_path) {
-        strncpy(g_db_path, db_path, sizeof(g_db_path) - 1);
-    }
+    printf("[SMS] 初始化短信模块\n");
     
-    printf("[SMS] 初始化短信模块，数据库: %s\n", g_db_path);
-    
-    /* 初始化数据库 */
-    if (db_init() != 0) {
+    /* 初始化数据库模块 */
+    if (db_init(db_path) != 0) {
         printf("[SMS] 数据库初始化失败\n");
         return -1;
     }
+    
+    printf("[SMS] 数据库路径: %s\n", db_get_path());
     
     /* 加载配置 */
     load_sms_config();
@@ -630,7 +542,7 @@ int sms_send(const char *recipient, const char *content, char *result_path, size
 
 /* 获取短信列表 - 使用hex编码避免特殊字符问题，兼容无JSON扩展的SQLite */
 int sms_get_list(SmsMessage *messages, int max_count) {
-    char cmd[512];
+    char sql[512];
     char *output = NULL;
     
     if (!messages || max_count <= 0) return -1;
@@ -640,12 +552,12 @@ int sms_get_list(SmsMessage *messages, int max_count) {
     if (!output) return -1;
     
     /* 使用hex编码content字段，用|分隔，每行一条记录 */
-    snprintf(cmd, sizeof(cmd),
-        "sqlite3 '%s' \"SELECT id || '|' || sender || '|' || hex(content) || '|' || timestamp || '|' || is_read FROM sms ORDER BY id DESC LIMIT %d;\"",
-        g_db_path, max_count);
+    snprintf(sql, sizeof(sql),
+        "SELECT id || '|' || sender || '|' || hex(content) || '|' || timestamp || '|' || is_read FROM sms ORDER BY id DESC LIMIT %d;",
+        max_count);
     
     pthread_mutex_lock(&g_sms_mutex);
-    int ret = run_command(output, 256 * 1024, "sh", "-c", cmd, NULL);
+    int ret = db_query_string(sql, output, 256 * 1024);
     pthread_mutex_unlock(&g_sms_mutex);
     
     if (ret != 0 || strlen(output) == 0) {
@@ -714,17 +626,8 @@ int sms_get_list(SmsMessage *messages, int max_count) {
 
 /* 获取短信总数 */
 int sms_get_count(void) {
-    char cmd[256];
-    char output[64];
-    
-    snprintf(cmd, sizeof(cmd), "sqlite3 '%s' \"SELECT COUNT(*) FROM sms;\"", g_db_path);
-    
-    pthread_mutex_lock(&g_sms_mutex);
-    int ret = run_command(output, sizeof(output), "sh", "-c", cmd, NULL);
-    pthread_mutex_unlock(&g_sms_mutex);
-    
-    if (ret != 0) return -1;
-    return atoi(output);
+    const char *sql = "SELECT COUNT(*) FROM sms;";
+    return db_query_int(sql, -1);
 }
 
 /* 删除短信 */
@@ -747,42 +650,18 @@ int sms_clear_all(void) {
     return ret;
 }
 
-/* SQL字符串反转义辅助函数 - 反转义换行符等 */
-static void sql_unescape_string(char *str) {
-    char *src = str;
-    char *dst = str;
-    while (*src) {
-        if (*src == '\\' && *(src + 1)) {
-            src++;
-            switch (*src) {
-                case 'n': *dst++ = '\n'; break;
-                case 'r': *dst++ = '\r'; break;
-                case '\\': *dst++ = '\\'; break;
-                default: *dst++ = *src; break;
-            }
-            src++;
-        } else {
-            *dst++ = *src++;
-        }
-    }
-    *dst = '\0';
-}
-
 /* 获取Webhook配置 */
 int sms_get_webhook_config(WebhookConfig *config) {
-    char cmd[512];
     char output[4096];
     
     if (!config) return -1;
     
     memset(config, 0, sizeof(WebhookConfig));
     
-    snprintf(cmd, sizeof(cmd),
-        "sqlite3 -separator '|' '%s' \"SELECT enabled, platform, url, body, headers FROM webhook_config WHERE id = 1;\"",
-        g_db_path);
+    const char *sql = "SELECT enabled, platform, url, body, headers FROM webhook_config WHERE id = 1;";
     
     pthread_mutex_lock(&g_sms_mutex);
-    int ret = run_command(output, sizeof(output), "sh", "-c", cmd, NULL);
+    int ret = db_query_rows(sql, "|", output, sizeof(output));
     pthread_mutex_unlock(&g_sms_mutex);
     
     if (ret != 0 || strlen(output) == 0) {
@@ -822,41 +701,12 @@ int sms_get_webhook_config(WebhookConfig *config) {
         if (nl) *nl = '\0';
         
         /* 反转义特殊字符 */
-        sql_unescape_string(config->url);
-        sql_unescape_string(config->body);
-        sql_unescape_string(config->headers);
+        db_unescape_string(config->url);
+        db_unescape_string(config->body);
+        db_unescape_string(config->headers);
     }
     
     return 0;
-}
-
-/* SQL字符串转义辅助函数 - 转义单引号和换行符 */
-static void sql_escape_string(const char *src, char *dst, size_t dst_size) {
-    size_t j = 0;
-    for (size_t i = 0; src[i] && j < dst_size - 4; i++) {
-        switch (src[i]) {
-            case '\'':
-                dst[j++] = '\'';
-                dst[j++] = '\'';
-                break;
-            case '\n':
-                dst[j++] = '\\';
-                dst[j++] = 'n';
-                break;
-            case '\r':
-                dst[j++] = '\\';
-                dst[j++] = 'r';
-                break;
-            case '\\':
-                dst[j++] = '\\';
-                dst[j++] = '\\';
-                break;
-            default:
-                dst[j++] = src[i];
-                break;
-        }
-    }
-    dst[j] = '\0';
 }
 
 /* 保存Webhook配置 */
@@ -869,9 +719,9 @@ int sms_save_webhook_config(const WebhookConfig *config) {
     if (!config) return -1;
     
     /* 转义特殊字符 */
-    sql_escape_string(config->body, escaped_body, sizeof(escaped_body));
-    sql_escape_string(config->headers, escaped_headers, sizeof(escaped_headers));
-    sql_escape_string(config->url, escaped_url, sizeof(escaped_url));
+    db_escape_string(config->body, escaped_body, sizeof(escaped_body));
+    db_escape_string(config->headers, escaped_headers, sizeof(escaped_headers));
+    db_escape_string(config->url, escaped_url, sizeof(escaped_url));
     
     snprintf(sql, sizeof(sql),
         "INSERT OR REPLACE INTO webhook_config (id, enabled, platform, url, body, headers) "
@@ -959,20 +809,8 @@ void sms_maintenance(void) {
 
 /* 获取短信接收修复开关状态 */
 int sms_get_fix_enabled(void) {
-    char cmd[256];
-    char output[64];
-    
-    snprintf(cmd, sizeof(cmd), "sqlite3 '%s' \"SELECT sms_fix_enabled FROM sms_config WHERE id = 1;\"", g_db_path);
-    
-    pthread_mutex_lock(&g_sms_mutex);
-    int ret = run_command(output, sizeof(output), "sh", "-c", cmd, NULL);
-    pthread_mutex_unlock(&g_sms_mutex);
-    
-    if (ret != 0 || strlen(output) == 0) {
-        return 0;  /* 默认关闭 */
-    }
-    
-    return atoi(output);
+    const char *sql = "SELECT sms_fix_enabled FROM sms_config WHERE id = 1;";
+    return db_query_int(sql, 0);  /* 默认关闭 */
 }
 
 /* 设置短信接收修复开关 */
@@ -1079,7 +917,7 @@ int sms_delete_sent(int id) {
 
 /* 获取发送记录列表 - 使用hex编码避免特殊字符问题，兼容无JSON扩展的SQLite */
 int sms_get_sent_list(SentSmsMessage *messages, int max_count) {
-    char cmd[512];
+    char sql[512];
     char *output = NULL;
     
     if (!messages || max_count <= 0) return -1;
@@ -1089,12 +927,12 @@ int sms_get_sent_list(SentSmsMessage *messages, int max_count) {
     if (!output) return -1;
     
     /* 使用hex编码content字段，用|分隔，每行一条记录 */
-    snprintf(cmd, sizeof(cmd),
-        "sqlite3 '%s' \"SELECT id || '|' || recipient || '|' || hex(content) || '|' || timestamp || '|' || status FROM sent_sms ORDER BY id DESC LIMIT %d;\"",
-        g_db_path, max_count);
+    snprintf(sql, sizeof(sql),
+        "SELECT id || '|' || recipient || '|' || hex(content) || '|' || timestamp || '|' || status FROM sent_sms ORDER BY id DESC LIMIT %d;",
+        max_count);
     
     pthread_mutex_lock(&g_sms_mutex);
-    int ret = run_command(output, 256 * 1024, "sh", "-c", cmd, NULL);
+    int ret = db_query_string(sql, output, 256 * 1024);
     pthread_mutex_unlock(&g_sms_mutex);
     
     if (ret != 0 || strlen(output) == 0) {
@@ -1174,13 +1012,11 @@ int sms_get_max_sent_count(void) {
 
 /* 加载配置 */
 static void load_sms_config(void) {
-    char cmd[256];
     char output[128];
-    
-    snprintf(cmd, sizeof(cmd), "sqlite3 -separator '|' '%s' \"SELECT max_count, max_sent_count FROM sms_config WHERE id = 1;\"", g_db_path);
+    const char *sql = "SELECT max_count || '|' || max_sent_count FROM sms_config WHERE id = 1;";
     
     pthread_mutex_lock(&g_sms_mutex);
-    int ret = run_command(output, sizeof(output), "sh", "-c", cmd, NULL);
+    int ret = db_query_string(sql, output, sizeof(output));
     pthread_mutex_unlock(&g_sms_mutex);
     
     if (ret == 0 && strlen(output) > 0) {
@@ -1243,86 +1079,3 @@ int sms_set_max_sent_count(int count) {
     return ret;
 }
 
-
-/* ==================== 通用配置函数 ==================== */
-
-/* 获取数据库路径 */
-const char *get_db_path(void) {
-    return g_db_path;
-}
-
-/* 获取通用配置值 */
-int config_get(const char *key, char *value, size_t value_size) {
-    if (!key || !value || value_size == 0) return -1;
-    
-    char cmd[512];
-    char output[1024];
-    
-    snprintf(cmd, sizeof(cmd), 
-        "sqlite3 '%s' \"SELECT value FROM config WHERE key='%s';\"", 
-        g_db_path, key);
-    
-    pthread_mutex_lock(&g_sms_mutex);
-    int ret = run_command(output, sizeof(output), "sh", "-c", cmd, NULL);
-    pthread_mutex_unlock(&g_sms_mutex);
-    
-    if (ret != 0 || strlen(output) == 0) {
-        return -1;
-    }
-    
-    /* 去除换行符 */
-    size_t len = strlen(output);
-    if (len > 0 && output[len-1] == '\n') output[len-1] = '\0';
-    
-    strncpy(value, output, value_size - 1);
-    value[value_size - 1] = '\0';
-    return 0;
-}
-
-/* 设置通用配置值 */
-int config_set(const char *key, const char *value) {
-    if (!key || !value) return -1;
-    
-    char sql[1024];
-    snprintf(sql, sizeof(sql),
-        "INSERT OR REPLACE INTO config (key, value) VALUES ('%s', '%s');",
-        key, value);
-    
-    pthread_mutex_lock(&g_sms_mutex);
-    int ret = db_execute(sql);
-    pthread_mutex_unlock(&g_sms_mutex);
-    
-    return ret;
-}
-
-/* 获取通用配置整数值 */
-int config_get_int(const char *key, int default_val) {
-    char value[64];
-    if (config_get(key, value, sizeof(value)) == 0) {
-        return atoi(value);
-    }
-    return default_val;
-}
-
-/* 设置通用配置整数值 */
-int config_set_int(const char *key, int value) {
-    char str[32];
-    snprintf(str, sizeof(str), "%d", value);
-    return config_set(key, str);
-}
-
-/* 获取通用配置长整数值 */
-long long config_get_ll(const char *key, long long default_val) {
-    char value[64];
-    if (config_get(key, value, sizeof(value)) == 0) {
-        return atoll(value);
-    }
-    return default_val;
-}
-
-/* 设置通用配置长整数值 */
-int config_set_ll(const char *key, long long value) {
-    char str[32];
-    snprintf(str, sizeof(str), "%lld", value);
-    return config_set(key, str);
-}

@@ -9,7 +9,7 @@ GLIB_DIR = ..
 INCLUDES = -I$(GLIB_DIR)/include/glib-2.0 \
            -I$(GLIB_DIR)/lib/glib-2.0/include \
            -I$(GLIB_DIR)/include/gio-unix-2.0 \
-           -I. -Ihandlers -Isystem -Ilib -Iverify
+           -I. -Iinclude -Iinclude/system -Iinclude/handlers -Iinclude/lib
 
 LDFLAGS = -L$(GLIB_DIR)/lib -Wl,-rpath-link,$(GLIB_DIR)/lib -Wl,--allow-shlib-undefined
 LIBS = -lgio-2.0 -lgobject-2.0 -lglib-2.0 -lgmodule-2.0 -lpthread
@@ -21,19 +21,19 @@ TARGET = $(BUILD_DIR)/ofono-server
 MAIN_SRCS = main.c mongoose.c packed_fs.c
 HANDLER_SRCS = handlers/http_server.c handlers/handlers.c
 SYSTEM_SRCS = system/sysinfo.c system/modem.c system/airplane.c system/ofono.c \
-              system/dbus_core.c system/exec_utils.c system/advanced.c \
+              system/exec_utils.c system/advanced.c \
               system/traffic.c system/reboot.c system/charge.c system/sms.c system/update.c \
               system/usb_mode.c system/plugin.c system/plugin_storage.c \
-              system/sha256.c system/auth.c
+              system/sha256.c system/auth.c system/database.c
 SRCS = $(MAIN_SRCS) $(HANDLER_SRCS) $(SYSTEM_SRCS)
 OBJS = $(BUILD_DIR)/main.o $(BUILD_DIR)/mongoose.o $(BUILD_DIR)/packed_fs.o \
        $(BUILD_DIR)/http_server.o $(BUILD_DIR)/handlers.o \
        $(BUILD_DIR)/sysinfo.o $(BUILD_DIR)/modem.o $(BUILD_DIR)/airplane.o \
-       $(BUILD_DIR)/ofono.o $(BUILD_DIR)/dbus_core.o $(BUILD_DIR)/exec_utils.o \
+       $(BUILD_DIR)/ofono.o $(BUILD_DIR)/exec_utils.o \
        $(BUILD_DIR)/advanced.o $(BUILD_DIR)/traffic.o $(BUILD_DIR)/reboot.o \
        $(BUILD_DIR)/charge.o $(BUILD_DIR)/sms.o $(BUILD_DIR)/update.o $(BUILD_DIR)/usb_mode.o \
        $(BUILD_DIR)/plugin.o $(BUILD_DIR)/plugin_storage.o \
-       $(BUILD_DIR)/sha256.o $(BUILD_DIR)/auth.o
+       $(BUILD_DIR)/sha256.o $(BUILD_DIR)/auth.o $(BUILD_DIR)/database.o
 
 .PHONY: all clean
 
@@ -74,9 +74,6 @@ $(BUILD_DIR)/airplane.o: system/airplane.c | $(BUILD_DIR)
 $(BUILD_DIR)/ofono.o: system/ofono.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
-$(BUILD_DIR)/dbus_core.o: system/dbus_core.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
-
 $(BUILD_DIR)/exec_utils.o: system/exec_utils.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
@@ -111,6 +108,9 @@ $(BUILD_DIR)/sha256.o: system/sha256.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(BUILD_DIR)/auth.o: system/auth.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+$(BUILD_DIR)/database.o: system/database.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
 $(BUILD_DIR):
